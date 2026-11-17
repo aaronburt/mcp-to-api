@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcp-credential-gateway"
+version = "0.1.0"
+description = "Least-privilege MCP credential gateway for isolating API secrets from AI agents"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "anyio>=4.9.0",
+    "httpx2>=2.10.0",
+    "mcp>=2.0.0,<3.0.0",
+    "pydantic>=2.12.0",
+    "PyYAML>=6.0",
+    "starlette>=0.48.0",
+    "uvicorn>=0.31.1",
+]
+
+[project.scripts]
+mcp-gateway = "gateway.cli:main"
+mcp-gateway-token = "gateway.cli:token_main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

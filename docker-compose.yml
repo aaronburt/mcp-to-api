@@ -1,0 +1,20 @@
+services:
+  mcp-gateway:
+    build: .
+    image: mcp-credential-gateway:latest
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      PVE_URL: ${PVE_URL}
+      PVE_TOKEN_ID: ${PVE_TOKEN_ID}
+      PVE_TOKEN_SECRET: ${PVE_TOKEN_SECRET}
+    volumes:
+      - ./gateway.yaml:/etc/gateway/gateway.yaml:ro
+    ports:
+      - "${GATEWAY_BIND_IP:-127.0.0.1}:8080:8080"
