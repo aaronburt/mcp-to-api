@@ -22,89 +22,87 @@ def _make_base_config(secret_file: Path, ca_file: Path | None = None) -> dict:
             "max_request_body": "32KB",
         },
         "services": {
-            "proxmox": {
-                "url": "https://pve.lan:8006/api2/json",
-                "description": "Proxmox audit",
+            "upstream": {
+                "url": "https://api.lan:8443/v1",
+                "description": "Internal API read-only",
                 "tls": tls_cfg,
                 "auth": {
                     "type": "header",
                     "header": "Authorization",
-                    "value": f"PVEAPIToken=${{env:PVE_TOKEN_ID}}=${{file:{secret_file}}}",
+                    "value": f"Token ${{env:API_KEY_ID}}:${{file:{secret_file}}}",
                 },
             }
         },
         "acls": {
-            "proxmox-audit": {
-                "proxmox": {
-                    "GET": ["/version", "/nodes", "/nodes/*/status"],
+            "api-readonly": {
+                "upstream": {
+                    "GET": ["/status", "/projects", "/projects/*/status"],
                 }
             }
         },
         "tokens": {
-            "hermes": {
+            "agent-1": {
                 "hash": "sha256:" + ("a" * 64),
-                "acls": ["proxmox-audit"],
+                "acls": ["api-readonly"],
             }
         },
     }
 
 
 class TestConfigAndSecrets(unittest.TestCase):
-    def test_load_proxmox_config_and_strip_trailing_newline(self) -> None:
+    def test_load_config_and_strip_trailing_newline(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            secret_file = tmp_path / "pve_token"
+            secret_file = tmp_path / "api_token"
             secret_file.write_text("uuid-secret-9999\r\n", encoding="utf-8")
             ca_file = tmp_path / "ca.pem"
             ca_file.write_text("dummy-ca", encoding="utf-8")
 
             raw = _make_base_config(secret_file, ca_file)
-            with patch.dict(os.environ, {"PVE_TOKEN_ID": "audit@pve!gateway"}):
+            with patch.dict(os.environ, {"API_KEY_ID": "svc-account"}):
                 cfg = load_config_from_dict(raw)
 
-            svc = cfg.services["proxmox"]
+            svc = cfg.services["upstream"]
             self.assertEqual(
                 svc.auth.header_value,
-                "PVEAPIToken=audit@pve!gateway=uuid-secret-9999",
+                "Token svc-account:uuid-secret-9999",
             )
-            self.assertEqual(svc.origin.base_path, "/api2/json")
-            self.assertEqual(svc.origin.port, 8006)
+            self.assertEqual(svc.origin.base_path, "/v1")
+            self.assertEqual(svc.origin.port, 8443)
             self.assertEqual(svc.connect_timeout, 2.0)
             self.assertEqual(svc.timeout, 10.0)
             self.assertEqual(svc.max_response_bytes, 1024 * 1024)
             self.assertEqual(svc.max_request_body_bytes, 32 * 1024)
 
             scrubbed_task = cfg.redactor.scrub_text(
-                '{"user":"audit@pve!gateway","leak":"uuid-secret-9999"}'
+                '{"user":"svc-account","leak":"uuid-secret-9999"}'
             )
-            self.assertIn("audit@pve!gateway", scrubbed_task)
+            self.assertIn("svc-account", scrubbed_task)
             self.assertNotIn("uuid-secret-9999", scrubbed_task)
             self.assertIn(REDACTED_MARKER, scrubbed_task)
 
     def test_example_yaml_validates_with_secrets(self) -> None:
         repo_root = Path(__file__).resolve().parent.parent
-        example_file = repo_root / "gateway.proxmox.example.yaml"
+        example_file = repo_root / "gateway.example.yaml"
         with patch.dict(
             os.environ,
             {
-                "PVE_URL": "https://pve.lan:8006/api2/json",
-                "PVE_TOKEN_ID": "audit@pve!gateway",
-                "PVE_TOKEN_SECRET": "secret-uuid-1234",
+                "API_URL": "https://api.internal.example/api",
+                "API_TOKEN": "secret-uuid-1234",
             },
         ):
             cfg = load_config(example_file)
-        self.assertIn("proxmox", cfg.services)
-        self.assertEqual(cfg.services["proxmox"].origin.base_url, "https://pve.lan:8006/api2/json")
-        self.assertIn("hermes", cfg.agents)
-        self.assertIn("claude-code", cfg.agents)
-        scrubbed = cfg.redactor.scrub_text('{"user":"audit@pve!gateway","tok":"secret-uuid-1234"}')
-        self.assertIn("audit@pve!gateway", scrubbed)
+        self.assertIn("internal-api", cfg.services)
+        self.assertEqual(cfg.services["internal-api"].origin.base_url, "https://api.internal.example/api")
+        self.assertIn("assistant", cfg.agents)
+        self.assertIn("ci-agent", cfg.agents)
+        scrubbed = cfg.redactor.scrub_text('{"user":"svc-account","tok":"secret-uuid-1234"}')
+        self.assertIn("svc-account", scrubbed)
         self.assertNotIn("secret-uuid-1234", scrubbed)
         with patch.dict(
             os.environ,
             {
-                "PVE_TOKEN_ID": "audit@pve!gateway",
-                "PVE_TOKEN_SECRET": "secret-uuid-1234",
+                "API_TOKEN": "secret-uuid-1234",
             },
             clear=True,
         ):
@@ -114,15 +112,15 @@ class TestConfigAndSecrets(unittest.TestCase):
     def test_rejects_unresolved_or_empty_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            secret_file = tmp_path / "pve_token"
+            secret_file = tmp_path / "api_token"
             secret_file.write_text("\n", encoding="utf-8")
             raw = _make_base_config(secret_file)
-            with patch.dict(os.environ, {"PVE_TOKEN_ID": "audit@pve!gateway"}):
+            with patch.dict(os.environ, {"API_KEY_ID": "svc-account"}):
                 with self.assertRaises(ConfigError):
                     load_config_from_dict(raw)
 
             secret_file.write_text("line1\nline2", encoding="utf-8")
-            with patch.dict(os.environ, {"PVE_TOKEN_ID": "audit@pve!gateway"}):
+            with patch.dict(os.environ, {"API_KEY_ID": "svc-account"}):
                 with self.assertRaises(ConfigError):
                     load_config_from_dict(raw)
 
@@ -133,46 +131,46 @@ class TestConfigAndSecrets(unittest.TestCase):
 
     def test_rejects_bad_acls_tokens_and_urls(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            secret_file = Path(tmp) / "pve_token"
+            secret_file = Path(tmp) / "api_token"
             secret_file.write_text("valid-secret", encoding="utf-8")
 
-            with patch.dict(os.environ, {"PVE_TOKEN_ID": "audit@pve!gateway"}):
+            with patch.dict(os.environ, {"API_KEY_ID": "svc-account"}):
                 bad_acl_svc = _make_base_config(secret_file)
-                bad_acl_svc["acls"]["proxmox-audit"]["unknown"] = {"GET": ["/x"]}
+                bad_acl_svc["acls"]["api-readonly"]["unknown"] = {"GET": ["/x"]}
                 with self.assertRaises(ConfigError):
                     load_config_from_dict(bad_acl_svc)
 
                 bad_token_acl = _make_base_config(secret_file)
-                bad_token_acl["tokens"]["hermes"]["acls"] = ["missing-acl"]
+                bad_token_acl["tokens"]["agent-1"]["acls"] = ["missing-acl"]
                 with self.assertRaises(ConfigError):
                     load_config_from_dict(bad_token_acl)
 
                 bad_pattern = _make_base_config(secret_file)
-                bad_pattern["acls"]["proxmox-audit"]["proxmox"]["GET"] = ["/nodes/*/stat*"]
+                bad_pattern["acls"]["api-readonly"]["upstream"]["GET"] = ["/projects/*/stat*"]
                 with self.assertRaises(ConfigError):
                     load_config_from_dict(bad_pattern)
 
                 bad_http = _make_base_config(secret_file)
-                bad_http["services"]["proxmox"]["url"] = "http://pve.lan:8006/api2/json"
+                bad_http["services"]["upstream"]["url"] = "http://api.lan:8443/v1"
                 with self.assertRaises(ConfigError):
                     load_config_from_dict(bad_http)
 
                 bad_tls = _make_base_config(secret_file)
                 ca_file = Path(tmp) / "ca.pem"
                 ca_file.write_text("ca", encoding="utf-8")
-                bad_tls["services"]["proxmox"]["tls"] = {"verify": False, "ca": str(ca_file)}
+                bad_tls["services"]["upstream"]["tls"] = {"verify": False, "ca": str(ca_file)}
                 with self.assertRaises(ConfigError):
                     load_config_from_dict(bad_tls)
 
                 bad_non_ascii_acl = _make_base_config(secret_file)
-                bad_non_ascii_acl["acls"]["proxmox-audit"]["proxmox"]["GET"] = ["/nodes/\u00e9"]
+                bad_non_ascii_acl["acls"]["api-readonly"]["upstream"]["GET"] = ["/projects/\u00e9"]
                 with self.assertRaises(ConfigError):
                     load_config_from_dict(bad_non_ascii_acl)
 
                 dup_hash = _make_base_config(secret_file)
                 dup_hash["tokens"]["other"] = {
-                    "hash": dup_hash["tokens"]["hermes"]["hash"],
-                    "acls": ["proxmox-audit"],
+                    "hash": dup_hash["tokens"]["agent-1"]["hash"],
+                    "acls": ["api-readonly"],
                 }
                 with self.assertRaises(ConfigError):
                     load_config_from_dict(dup_hash)

@@ -24,24 +24,24 @@ def _sha256_prefixed(token: str) -> str:
 class TestMcpHttpEndToEnd(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
-        self.secret = "pve-super-secret-uuid-5555"
-        secret_file = Path(self._tmp.name) / "pve_token"
+        self.secret = "api-super-secret-uuid-5555"
+        secret_file = Path(self._tmp.name) / "api_token"
         secret_file.write_text(self.secret, encoding="utf-8")
 
-        self.hermes_token = "hermes-secret-bearer-token-0001"
+        self.agent1_token = "agent1-secret-bearer-token-0001"
         self.other_token = "other-secret-bearer-token-0002"
         self.audit_stream = io.StringIO()
 
         raw = {
             "services": {
-                "proxmox": {
-                    "url": "https://pve.lan:8006/api2/json",
-                    "description": "Proxmox VE read-only audit",
+                "upstream": {
+                    "url": "https://api.lan:8443/v1",
+                    "description": "Internal API read-only",
                     "tls": {"verify": False},
                     "auth": {
                         "type": "header",
                         "header": "Authorization",
-                        "value": f"PVEAPIToken=${{env:PVE_TOKEN_ID}}=${{file:{secret_file}}}",
+                        "value": f"Token ${{env:API_KEY_ID}}:${{file:{secret_file}}}",
                     },
                 },
                 "metrics": {
@@ -51,9 +51,9 @@ class TestMcpHttpEndToEnd(unittest.IsolatedAsyncioTestCase):
                 },
             },
             "acls": {
-                "proxmox-audit": {
-                    "proxmox": {
-                        "GET": ["/version", "/nodes", "/nodes/*/status"],
+                "api-readonly": {
+                    "upstream": {
+                        "GET": ["/status", "/projects", "/projects/*/status"],
                     }
                 },
                 "metrics-read": {
@@ -63,9 +63,9 @@ class TestMcpHttpEndToEnd(unittest.IsolatedAsyncioTestCase):
                 },
             },
             "tokens": {
-                "hermes": {
-                    "hash": _sha256_prefixed(self.hermes_token),
-                    "acls": ["proxmox-audit"],
+                "agent-1": {
+                    "hash": _sha256_prefixed(self.agent1_token),
+                    "acls": ["api-readonly"],
                 },
                 "other": {
                     "hash": _sha256_prefixed(self.other_token),
@@ -73,11 +73,11 @@ class TestMcpHttpEndToEnd(unittest.IsolatedAsyncioTestCase):
                 },
             },
         }
-        with patch.dict(os.environ, {"PVE_TOKEN_ID": "audit@pve!gateway"}):
+        with patch.dict(os.environ, {"API_KEY_ID": "svc-account"}):
             self.cfg = load_config_from_dict(raw)
 
-        def mock_pve(request: httpx2.Request) -> httpx2.Response:
-            if request.url.path == "/api2/json/nodes/pve1/status":
+        def mock_upstream(request: httpx2.Request) -> httpx2.Response:
+            if request.url.path == "/v1/projects/proj1/status":
                 return httpx2.Response(
                     200,
                     headers={"Content-Type": "application/json"},
@@ -97,7 +97,7 @@ class TestMcpHttpEndToEnd(unittest.IsolatedAsyncioTestCase):
             self.cfg,
             audit_logger=self.audit_logger,
             transports={
-                "proxmox": httpx2.MockTransport(mock_pve),
+                "upstream": httpx2.MockTransport(mock_upstream),
                 "metrics": httpx2.MockTransport(mock_metrics),
             },
         )
@@ -117,7 +117,7 @@ class TestMcpHttpEndToEnd(unittest.IsolatedAsyncioTestCase):
                     hz.json(),
                     {"status": "ok", "config_loaded": True, "secrets_present": True},
                 )
-                self.assertNotIn("proxmox", hz.text)
+                self.assertNotIn("upstream", hz.text)
                 self.assertNotIn(self.secret, hz.text)
 
                 unauth = await raw_client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "initialize"})
@@ -133,34 +133,34 @@ class TestMcpHttpEndToEnd(unittest.IsolatedAsyncioTestCase):
                 bad_origin = await raw_client.post(
                     "/mcp",
                     headers={
-                        "Authorization": f"Bearer {self.hermes_token}",
+                        "Authorization": f"Bearer {self.agent1_token}",
                         "Origin": "https://evil.example",
                     },
                     json={"jsonrpc": "2.0", "id": 1, "method": "initialize"},
                 )
                 self.assertEqual(bad_origin.status_code, 403)
 
-            hermes_http = httpx2.AsyncClient(
+            agent1_http = httpx2.AsyncClient(
                 transport=transport,
-                headers={"Authorization": f"Bearer {self.hermes_token}"},
+                headers={"Authorization": f"Bearer {self.agent1_token}"},
             )
-            async with hermes_http:
+            async with agent1_http:
                 async with streamable_http_client(
                     "http://gateway.lan:8080/mcp",
-                    http_client=hermes_http,
+                    http_client=agent1_http,
                 ) as (read_stream, write_stream):
                     async with ClientSession(read_stream, write_stream) as session:
                         init_res = await session.initialize()
                         self.assertIsNotNone(init_res.instructions)
-                        self.assertIn("Allowed Routes for `hermes`", init_res.instructions)
-                        self.assertIn("GET /nodes/*/status", init_res.instructions)
+                        self.assertIn("Allowed Routes for `agent-1`", init_res.instructions)
+                        self.assertIn("GET /projects/*/status", init_res.instructions)
                         self.assertNotIn("metrics", init_res.instructions)
 
                         resources = await session.list_resources()
                         self.assertIn("gateway://instructions.md", [str(r.uri) for r in resources.resources])
                         inst_doc = await session.read_resource("gateway://instructions.md")
                         inst_text = inst_doc.contents[0].text
-                        self.assertIn("GET /nodes/*/status", inst_text)
+                        self.assertIn("GET /projects/*/status", inst_text)
                         self.assertNotIn("metrics", inst_text)
 
                         tools = await session.list_tools()
@@ -170,14 +170,14 @@ class TestMcpHttpEndToEnd(unittest.IsolatedAsyncioTestCase):
                         svc_res = await session.call_tool("list_services", {})
                         self.assertFalse(svc_res.is_error)
                         svc_json = json.loads(svc_res.content[0].text)
-                        self.assertEqual([s["name"] for s in svc_json["services"]], ["proxmox"])
+                        self.assertEqual([s["name"] for s in svc_json["services"]], ["upstream"])
 
                         ok_res = await session.call_tool(
                             "http_request",
                             {
-                                "service": "proxmox",
+                                "service": "upstream",
                                 "method": "GET",
-                                "path": "/nodes/pve1/status",
+                                "path": "/projects/proj1/status",
                             },
                         )
                         self.assertFalse(ok_res.is_error)
@@ -188,13 +188,13 @@ class TestMcpHttpEndToEnd(unittest.IsolatedAsyncioTestCase):
                         denied_res = await session.call_tool(
                             "http_request",
                             {
-                                "service": "proxmox",
+                                "service": "upstream",
                                 "method": "GET",
-                                "path": "/nodes/pve1/qemu/100/config",
+                                "path": "/projects/proj1/items/100/config",
                             },
                         )
                         self.assertTrue(denied_res.is_error)
-                        self.assertIn("not allowed for proxmox", denied_res.content[0].text)
+                        self.assertIn("not allowed for upstream", denied_res.content[0].text)
 
                         ungranted_svc = await session.call_tool(
                             "http_request",
@@ -221,24 +221,24 @@ class TestMcpHttpEndToEnd(unittest.IsolatedAsyncioTestCase):
                         self.assertIsNotNone(other_init.instructions)
                         self.assertIn("Allowed Routes for `other`", other_init.instructions)
                         self.assertIn("GET /health", other_init.instructions)
-                        self.assertNotIn("proxmox", other_init.instructions)
+                        self.assertNotIn("upstream", other_init.instructions)
                         other_doc = await session.read_resource("gateway://instructions.md")
                         self.assertIn("GET /health", other_doc.contents[0].text)
-                        self.assertNotIn("proxmox", other_doc.contents[0].text)
+                        self.assertNotIn("upstream", other_doc.contents[0].text)
                         other_svcs = await session.call_tool("list_services", {})
                         self.assertEqual(
                             [s["name"] for s in json.loads(other_svcs.content[0].text)["services"]],
                             ["metrics"],
                         )
-                        denied_pve = await session.call_tool(
+                        denied_upstream = await session.call_tool(
                             "http_request",
                             {
-                                "service": "proxmox",
+                                "service": "upstream",
                                 "method": "GET",
-                                "path": "/version",
+                                "path": "/status",
                             },
                         )
-                        self.assertTrue(denied_pve.is_error)
+                        self.assertTrue(denied_upstream.is_error)
 
                         bad_fmt = await session.call_tool(
                             "http_request",
@@ -262,7 +262,7 @@ class TestMcpHttpEndToEnd(unittest.IsolatedAsyncioTestCase):
                 dup_auth = await raw_client.post(
                     "/mcp",
                     headers=[
-                        ("Authorization", f"Bearer {self.hermes_token}"),
+                        ("Authorization", f"Bearer {self.agent1_token}"),
                         ("Authorization", "Bearer extra"),
                     ],
                     json={"jsonrpc": "2.0", "id": 9, "method": "initialize"},
@@ -274,7 +274,7 @@ class TestMcpHttpEndToEnd(unittest.IsolatedAsyncioTestCase):
                     headers=[
                         ("Host", "gateway.lan:8080"),
                         ("Host", "evil.lan:8080"),
-                        ("Authorization", f"Bearer {self.hermes_token}"),
+                        ("Authorization", f"Bearer {self.agent1_token}"),
                     ],
                     json={"jsonrpc": "2.0", "id": 9, "method": "initialize"},
                 )
@@ -285,7 +285,7 @@ class TestMcpHttpEndToEnd(unittest.IsolatedAsyncioTestCase):
                     headers=[
                         ("Origin", "https://allowed.example"),
                         ("Origin", "https://evil.example"),
-                        ("Authorization", f"Bearer {self.hermes_token}"),
+                        ("Authorization", f"Bearer {self.agent1_token}"),
                     ],
                     json={"jsonrpc": "2.0", "id": 9, "method": "initialize"},
                 )
@@ -294,7 +294,7 @@ class TestMcpHttpEndToEnd(unittest.IsolatedAsyncioTestCase):
                 init_resp = await raw_client.post(
                     "/mcp",
                     headers={
-                        "Authorization": f"Bearer {self.hermes_token}",
+                        "Authorization": f"Bearer {self.agent1_token}",
                         "Accept": "application/json, text/event-stream",
                     },
                     json={
@@ -323,12 +323,12 @@ class TestMcpHttpEndToEnd(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(hijack_resp.status_code, 404)
 
         audit_text = self.audit_stream.getvalue()
-        self.assertNotIn(self.hermes_token, audit_text)
+        self.assertNotIn(self.agent1_token, audit_text)
         self.assertNotIn("wrong-token", audit_text)
         self.assertNotIn(self.secret, audit_text)
         records = [json.loads(line) for line in audit_text.strip().splitlines()]
         self.assertTrue(any(r["outcome"] == "unauthenticated" for r in records))
-        self.assertTrue(any(r["agent"] == "hermes" and r["outcome"] == "ok" for r in records))
+        self.assertTrue(any(r["agent"] == "agent-1" and r["outcome"] == "ok" for r in records))
         self.assertTrue(
             any(r["agent"] == "other" and r["outcome"] == "denied" and r["denial_reason"] == "body_format must be 'json' or 'form'" for r in records)
         )

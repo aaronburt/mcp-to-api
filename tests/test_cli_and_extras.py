@@ -24,7 +24,7 @@ class TestCliAndExtras(unittest.IsolatedAsyncioTestCase):
     def test_token_cli_and_check_cli(self) -> None:
         buf = io.StringIO()
         with redirect_stdout(buf):
-            rc = token_main(["--name", "hermes", "--acls", "proxmox-audit"])
+            rc = token_main(["--name", "agent-1", "--acls", "api-readonly"])
         self.assertEqual(rc, 0)
         out = buf.getvalue()
         lines = out.strip().splitlines()
@@ -40,27 +40,27 @@ class TestCliAndExtras(unittest.IsolatedAsyncioTestCase):
             cfg_file.write_text(
                 f"""
 services:
-  proxmox:
-    url: https://pve.lan:8006/api2/json
+  upstream:
+    url: https://api.lan:8443/v1
     tls:
       verify: false
     auth:
       type: header
       header: Authorization
-      value: "PVEAPIToken=${{env:PVE_TOKEN_ID}}=${{file:{secret_file.as_posix()}}}"
+      value: "Token ${{env:API_KEY_ID}}:${{file:{secret_file.as_posix()}}}"
 acls:
-  proxmox-audit:
-    proxmox:
-      GET: [/version]
+  api-readonly:
+    upstream:
+      GET: [/status]
 tokens:
-  hermes:
+  agent-1:
     hash: {expected_hash}
-    acls: [proxmox-audit]
+    acls: [api-readonly]
 """,
                 encoding="utf-8",
             )
             check_buf = io.StringIO()
-            with patch.dict(os.environ, {"PVE_TOKEN_ID": "audit@pve!gateway"}):
+            with patch.dict(os.environ, {"API_KEY_ID": "svc-account"}):
                 with redirect_stdout(check_buf):
                     rc_check = main(["--config", str(cfg_file), "--check"])
             self.assertEqual(rc_check, 0)
@@ -69,7 +69,7 @@ tokens:
             rc_missing = main(["--config", str(tmp_path / "missing.yaml"), "--check"])
             self.assertEqual(rc_missing, 2)
 
-            with patch.dict(os.environ, {"PVE_TOKEN_ID": "audit@pve!gateway"}):
+            with patch.dict(os.environ, {"API_KEY_ID": "svc-account"}):
                 with patch("gateway.cli.uvicorn.run") as mock_run:
                     rc_run = main(["--config", str(cfg_file), "--port", "0"])
             self.assertEqual(rc_run, 0)
@@ -106,7 +106,7 @@ tokens:
                     }
                 },
                 "tokens": {
-                    "hermes": {
+                    "agent-1": {
                         "hash": "sha256:" + hashlib.sha256(b"tok1").hexdigest(),
                         "acls": ["rw"],
                     }

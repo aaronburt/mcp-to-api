@@ -52,7 +52,7 @@ class TestEgressAndGateway(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.secret = "a1b2c3d4-secret-uuid-9876"
-        self.secret_file = Path(self._tmp.name) / "pve_token"
+        self.secret_file = Path(self._tmp.name) / "api_token"
         self.secret_file.write_text(self.secret, encoding="utf-8")
         self.audit_stream = io.StringIO()
 
@@ -68,74 +68,74 @@ class TestEgressAndGateway(unittest.IsolatedAsyncioTestCase):
                 "max_response": "512",
             },
             "services": {
-                "proxmox": {
-                    "url": "https://pve.lan:8006/api2/json",
-                    "description": "Proxmox audit",
-                    "notes": "Paths are relative to /api2/json",
+                "upstream": {
+                    "url": "https://api.lan:8443/v1",
+                    "description": "Internal API audit",
+                    "notes": "Paths are relative to /v1",
                     "tls": {"verify": False},
                     "auth": {
                         "type": "header",
                         "header": "Authorization",
-                        "value": f"PVEAPIToken=${{env:PVE_TOKEN_ID}}=${{file:{self.secret_file}}}",
+                        "value": f"Token ${{env:API_KEY_ID}}:${{file:{self.secret_file}}}",
                     },
                 }
             },
             "acls": {
-                "proxmox-audit": {
-                    "proxmox": {
+                "api-readonly": {
+                    "upstream": {
                         "GET": [
-                            "/version",
-                            "/cluster/resources",
-                            "/cluster/tasks",
-                            "/nodes",
-                            "/nodes/*/status",
-                            "/nodes/*/qemu",
-                            "/access/users",
+                            "/status",
+                            "/resources",
+                            "/tasks",
+                            "/projects",
+                            "/projects/*/status",
+                            "/projects/*/items",
+                            "/users",
                         ]
                     }
                 }
             },
             "tokens": {
-                "hermes": {
+                "agent-1": {
                     "hash": "sha256:" + ("a" * 64),
-                    "acls": ["proxmox-audit"],
+                    "acls": ["api-readonly"],
                 },
                 "limited": {
                     "hash": "sha256:" + ("b" * 64),
-                    "acls": ["proxmox-audit"],
+                    "acls": ["api-readonly"],
                     "enabled": False,
                 },
             },
         }
-        with patch.dict(os.environ, {"PVE_TOKEN_ID": "audit@pve!gateway"}):
+        with patch.dict(os.environ, {"API_KEY_ID": "svc-account"}):
             cfg = load_config_from_dict(raw)
         audit_logger = AuditLogger(stdout=True, redactor=cfg.redactor, stream=self.audit_stream)
         return GatewayCore(
             cfg,
             audit_logger=audit_logger,
-            transports={"proxmox": httpx2.MockTransport(handler)},
+            transports={"upstream": httpx2.MockTransport(handler)},
         )
 
-    async def test_proxmox_audit_flow_scrubbing_redirects_and_truncation(self) -> None:
+    async def test_egress_flow_scrubbing_redirects_and_truncation(self) -> None:
         seen_requests: list[httpx2.Request] = []
 
-        def mock_pve(request: httpx2.Request) -> httpx2.Response:
+        def mock_upstream(request: httpx2.Request) -> httpx2.Response:
             seen_requests.append(request)
-            if request.url.path == "/api2/json/cluster/tasks":
+            if request.url.path == "/v1/tasks":
                 return httpx2.Response(
                     200,
                     headers={
                         "Content-Type": "application/json",
-                        "Set-Cookie": "PVEAuthCookie=dontleak",
+                        "Set-Cookie": "SessionCookie=dontleak",
                         "X-Internal-Secret": self.secret,
                     },
                     json={
                         "data": [
-                            {"user": "audit@pve!gateway", "echoed": self.secret},
+                            {"user": "svc-account", "echoed": self.secret},
                         ]
                     },
                 )
-            if request.url.path == "/api2/json/nodes":
+            if request.url.path == "/v1/projects":
                 return httpx2.Response(
                     302,
                     headers={
@@ -144,13 +144,13 @@ class TestEgressAndGateway(unittest.IsolatedAsyncioTestCase):
                     },
                     text="redirecting",
                 )
-            if request.url.path == "/api2/json/cluster/resources":
+            if request.url.path == "/v1/resources":
                 return httpx2.Response(
                     200,
                     headers={"Content-Type": "application/json"},
                     text='{"data":"' + ("x" * 2000) + '"}',
                 )
-            if request.url.path == "/api2/json/version":
+            if request.url.path == "/v1/status":
                 return httpx2.Response(
                     404,
                     headers={"Content-Type": "application/json"},
@@ -159,18 +159,18 @@ class TestEgressAndGateway(unittest.IsolatedAsyncioTestCase):
             raise AssertionError(f"Unexpected upstream path: {request.url.path}")
 
         with patch.dict(os.environ, {"HTTP_PROXY": "http://127.0.0.1:9", "HTTPS_PROXY": "http://127.0.0.1:9"}):
-            core = self._build_gateway(mock_pve)
+            core = self._build_gateway(mock_upstream)
             try:
-                services = await core.list_services("hermes")
+                services = await core.list_services("agent-1")
                 self.assertEqual(len(services["services"]), 1)
-                self.assertEqual(services["services"][0]["name"], "proxmox")
+                self.assertEqual(services["services"][0]["name"], "upstream")
                 self.assertIn("GET", services["services"][0]["allowed"])
 
                 res = await core.http_request(
-                    agent_name="hermes",
-                    service="proxmox",
+                    agent_name="agent-1",
+                    service="upstream",
                     method="GET",
-                    path="/cluster/tasks",
+                    path="/tasks",
                     query={"limit": 5, "secret_query_val": "never-logged"},
                 )
                 self.assertFalse(res.is_error)
@@ -178,23 +178,23 @@ class TestEgressAndGateway(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(seen_requests), 1)
                 self.assertEqual(
                     str(seen_requests[0].url),
-                    "https://pve.lan:8006/api2/json/cluster/tasks?limit=5&secret_query_val=never-logged",
+                    "https://api.lan:8443/v1/tasks?limit=5&secret_query_val=never-logged",
                 )
                 self.assertEqual(
                     seen_requests[0].headers["authorization"],
-                    f"PVEAPIToken=audit@pve!gateway={self.secret}",
+                    f"Token svc-account:{self.secret}",
                 )
                 payload = json.loads(res.content[0].text)
                 self.assertEqual(payload["status"], 200)
                 self.assertEqual(payload["headers"], {"content-type": "application/json"})
-                self.assertEqual(payload["body"]["data"][0]["user"], "audit@pve!gateway")
+                self.assertEqual(payload["body"]["data"][0]["user"], "svc-account")
                 self.assertEqual(payload["body"]["data"][0]["echoed"], "[REDACTED]")
 
                 redir = await core.http_request(
-                    agent_name="hermes",
-                    service="proxmox",
+                    agent_name="agent-1",
+                    service="upstream",
                     method="GET",
-                    path="/nodes",
+                    path="/projects",
                 )
                 self.assertFalse(redir.is_error)
                 redir_payload = json.loads(redir.content[0].text)
@@ -202,10 +202,10 @@ class TestEgressAndGateway(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("location", redir_payload["headers"])
 
                 big = await core.http_request(
-                    agent_name="hermes",
-                    service="proxmox",
+                    agent_name="agent-1",
+                    service="upstream",
                     method="GET",
-                    path="/cluster/resources",
+                    path="/resources",
                 )
                 self.assertFalse(big.is_error)
                 big_payload = json.loads(big.content[0].text)
@@ -213,29 +213,29 @@ class TestEgressAndGateway(unittest.IsolatedAsyncioTestCase):
                 self.assertLessEqual(len(big_payload["body"].encode("utf-8")), 512)
 
                 upstream_404 = await core.http_request(
-                    agent_name="hermes",
-                    service="proxmox",
+                    agent_name="agent-1",
+                    service="upstream",
                     method="GET",
-                    path="/version",
+                    path="/status",
                 )
                 self.assertFalse(upstream_404.is_error)
                 self.assertEqual(json.loads(upstream_404.content[0].text)["status"], 404)
 
                 denied = await core.http_request(
-                    agent_name="hermes",
-                    service="proxmox",
+                    agent_name="agent-1",
+                    service="upstream",
                     method="GET",
-                    path="/nodes/pve1/qemu/100/config",
+                    path="/projects/proj1/items/100/config",
                 )
                 self.assertTrue(denied.is_error)
-                self.assertIn("not allowed for proxmox", denied.content[0].text)
+                self.assertIn("not allowed for upstream", denied.content[0].text)
                 self.assertEqual(len(seen_requests), 4)
 
                 disabled_res = await core.http_request(
                     agent_name="limited",
-                    service="proxmox",
+                    service="upstream",
                     method="GET",
-                    path="/version",
+                    path="/status",
                 )
                 self.assertTrue(disabled_res.is_error)
                 self.assertIn("not authorized", disabled_res.content[0].text)
@@ -247,12 +247,12 @@ class TestEgressAndGateway(unittest.IsolatedAsyncioTestCase):
         raw_audit = self.audit_stream.getvalue()
         self.assertNotIn(self.secret, raw_audit)
         self.assertNotIn("never-logged", raw_audit)
-        tasks_record = next(r for r in audit_lines if r["path"] == "/cluster/tasks")
+        tasks_record = next(r for r in audit_lines if r["path"] == "/tasks")
         self.assertEqual(tasks_record["query_keys"], ["limit", "secret_query_val"])
         self.assertEqual(tasks_record["outcome"], "ok")
-        self.assertEqual(tasks_record["acl"], "proxmox-audit")
+        self.assertEqual(tasks_record["acl"], "api-readonly")
         denied_record = next(r for r in audit_lines if r["outcome"] == "denied")
-        self.assertEqual(denied_record["path"], "/nodes/pve1/qemu/100/config")
+        self.assertEqual(denied_record["path"], "/projects/proj1/items/100/config")
         disabled_record = next(
             r for r in audit_lines if r["agent"] == "limited" and r["outcome"] == "denied"
         )
@@ -292,7 +292,7 @@ class TestEgressAndGateway(unittest.IsolatedAsyncioTestCase):
                 }
             },
             "acls": {"all": {"svc": {"GET": ["/items"]}}},
-            "tokens": {"hermes": {"hash": "sha256:" + ("d" * 64), "acls": ["all"]}},
+            "tokens": {"agent-1": {"hash": "sha256:" + ("d" * 64), "acls": ["all"]}},
         }
         cfg = load_config_from_dict(raw)
         transport = BlockingTransport()
@@ -303,11 +303,11 @@ class TestEgressAndGateway(unittest.IsolatedAsyncioTestCase):
         )
         try:
             task1 = asyncio.create_task(
-                core.http_request(agent_name="hermes", service="svc", method="GET", path="/items")
+                core.http_request(agent_name="agent-1", service="svc", method="GET", path="/items")
             )
             await entered.wait()
             timed_out = await core.http_request(
-                agent_name="hermes", service="svc", method="GET", path="/items"
+                agent_name="agent-1", service="svc", method="GET", path="/items"
             )
             self.assertTrue(timed_out.is_error)
             self.assertIn("concurrency queue timed out", timed_out.content[0].text)
@@ -319,7 +319,7 @@ class TestEgressAndGateway(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(body1["tok"], "[REDACTED]")
 
             res2 = await core.http_request(
-                agent_name="hermes", service="svc", method="GET", path="/items"
+                agent_name="agent-1", service="svc", method="GET", path="/items"
             )
             self.assertFalse(res2.is_error)
         finally:
@@ -336,7 +336,7 @@ class TestEgressAndGateway(unittest.IsolatedAsyncioTestCase):
         async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
             try:
                 await reader.read(4096)
-                body = b'{"data":{"version":"8.2"}}'
+                body = b'{"data":{"version":"1.2"}}'
                 resp = (
                     b"HTTP/1.1 200 OK\r\n"
                     b"Content-Type: application/json\r\n"
@@ -357,30 +357,30 @@ class TestEgressAndGateway(unittest.IsolatedAsyncioTestCase):
             def make_core(tls_cfg: dict) -> GatewayCore:
                 raw = {
                     "services": {
-                        "proxmox": {
-                            "url": f"https://127.0.0.1:{port}/api2/json",
+                        "upstream": {
+                            "url": f"https://127.0.0.1:{port}/v1",
                             "tls": tls_cfg,
                             "auth": {
                                 "type": "header",
                                 "header": "Authorization",
-                                "value": f"PVEAPIToken=${{env:PVE_TOKEN_ID}}=${{file:{self.secret_file}}}",
+                                "value": f"Token ${{env:API_KEY_ID}}:${{file:{self.secret_file}}}",
                             },
                         }
                     },
-                    "acls": {"pve": {"proxmox": {"GET": ["/version"]}}},
-                    "tokens": {"hermes": {"hash": "sha256:" + ("c" * 64), "acls": ["pve"]}},
+                    "acls": {"api": {"upstream": {"GET": ["/status"]}}},
+                    "tokens": {"agent-1": {"hash": "sha256:" + ("c" * 64), "acls": ["api"]}},
                 }
-                with patch.dict(os.environ, {"PVE_TOKEN_ID": "audit@pve!gateway"}):
+                with patch.dict(os.environ, {"API_KEY_ID": "svc-account"}):
                     cfg = load_config_from_dict(raw)
                 return GatewayCore(cfg, audit_logger=AuditLogger(stdout=False, redactor=cfg.redactor))
 
             untrusted_core = make_core({"verify": True})
             try:
                 res_fail = await untrusted_core.http_request(
-                    agent_name="hermes",
-                    service="proxmox",
+                    agent_name="agent-1",
+                    service="upstream",
                     method="GET",
-                    path="/version",
+                    path="/status",
                 )
                 self.assertTrue(res_fail.is_error)
                 self.assertEqual(res_fail.content[0].text, "Upstream TLS verification failed")
@@ -390,23 +390,23 @@ class TestEgressAndGateway(unittest.IsolatedAsyncioTestCase):
             pinned_core = make_core({"verify": True, "ca": str(cert_path)})
             try:
                 res_ok = await pinned_core.http_request(
-                    agent_name="hermes",
-                    service="proxmox",
+                    agent_name="agent-1",
+                    service="upstream",
                     method="GET",
-                    path="/version",
+                    path="/status",
                 )
                 self.assertFalse(res_ok.is_error)
-                self.assertEqual(json.loads(res_ok.content[0].text)["body"]["data"]["version"], "8.2")
+                self.assertEqual(json.loads(res_ok.content[0].text)["body"]["data"]["version"], "1.2")
             finally:
                 await pinned_core.aclose()
 
             insecure_core = make_core({"verify": False})
             try:
                 res_skip = await insecure_core.http_request(
-                    agent_name="hermes",
-                    service="proxmox",
+                    agent_name="agent-1",
+                    service="upstream",
                     method="GET",
-                    path="/version",
+                    path="/status",
                 )
                 self.assertFalse(res_skip.is_error)
             finally:

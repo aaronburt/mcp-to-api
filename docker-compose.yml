@@ -10,10 +10,8 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    environment:
-      PVE_URL: ${PVE_URL}
-      PVE_TOKEN_ID: ${PVE_TOKEN_ID}
-      PVE_TOKEN_SECRET: ${PVE_TOKEN_SECRET}
+    env_file:
+      - .env
     volumes:
       - ./gateway.yaml:/etc/gateway/gateway.yaml:ro
     ports:

@@ -21,7 +21,7 @@ def generate_token_pair() -> tuple[str, str]:
 def token_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mcp-gateway-token")
     parser.add_argument("--name", default="agent", help="Agent name for YAML snippet")
-    parser.add_argument("--acls", nargs="+", default=["proxmox-audit"], help="ACLs for YAML snippet")
+    parser.add_argument("--acls", nargs="+", default=["api-readonly"], help="ACLs for YAML snippet")
     args = parser.parse_args(argv)
     raw, hashed = generate_token_pair()
     acls_list = ", ".join(args.acls)

@@ -1,0 +1,35 @@
+defaults:
+  rate_limit: 60/min
+  max_concurrent: 8
+  connect_timeout: 5s
+  timeout: 20s
+  max_response: 2MB
+  max_request_body: 64KB
+
+services:
+  internal-api:
+    url: ${env:API_URL}
+    description: Internal REST API (read-only)
+    notes: Paths are relative to the configured base URL (for example /v1/status). Start with GET /v1/status or GET /v1/projects.
+    tls:
+      verify: true
+    auth:
+      type: bearer
+      token: ${secret_env:API_TOKEN}
+
+acls:
+  api-readonly:
+    internal-api:
+      GET:
+        - /v1/status
+        - /v1/projects
+        - /v1/projects/*/items
+        - /v1/users
+
+tokens:
+  assistant:
+    hash: sha256:0000000000000000000000000000000000000000000000000000000000000000
+    acls: [api-readonly]
+  ci-agent:
+    hash: sha256:1111111111111111111111111111111111111111111111111111111111111111
+    acls: [api-readonly]

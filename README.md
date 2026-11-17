@@ -33,41 +33,32 @@ A least-privilege **Model Context Protocol (MCP)** credential gateway that isola
 
 ---
 
-## Quickstart: Proxmox VE Audit Setup
+## Quickstart
 
-### 1. Create a read-only Proxmox API token
+### 1. Prepare upstream credentials
 
-On a Proxmox VE node:
-
-```bash
-pveum user add audit@pve --comment "Read-only MCP audit account"
-pveum user token add audit@pve gateway --privsep 1
-pveum acl modify / --tokens audit@pve!gateway --role PVEAuditor
-```
-
-Set the upstream connection values in `.env` (or your process environment):
+Create a least-privilege API token on your upstream service and set the base URL and credentials in `.env` (or your process environment):
 
 ```env
-PVE_URL=https://pve.lan:8006/api2/json
-PVE_TOKEN_ID=audit@pve!gateway
-PVE_TOKEN_SECRET=<generated-uuid-secret>
+API_URL=https://api.internal.example/api
+API_TOKEN=<upstream-api-secret>
 ```
 
 ### 2. Configure `gateway.yaml` and TLS
 
-Copy `gateway.proxmox.example.yaml` to `gateway.yaml`. `gateway.proxmox.example.yaml` uses `tls: { verify: false }` for Proxmox's default self-signed certificate. To pin the Proxmox root CA, mount `/etc/pve/pve-root-ca.pem` into `/etc/gateway/pve-root-ca.pem` and configure:
+Copy `gateway.example.yaml` to `gateway.yaml`. TLS verification is enabled by default (`tls: { verify: true }`). To pin a private CA certificate, mount it into `/etc/gateway/ca.pem` and configure:
 
 ```yaml
 tls:
   verify: true
-  ca: /etc/gateway/pve-root-ca.pem
+  ca: /etc/gateway/ca.pem
 ```
 
 ### 3. Generate per-agent bearer tokens
 
 ```bash
-python -m gateway.cli token --name hermes --acls proxmox-audit
-python -m gateway.cli token --name claude-code --acls proxmox-audit
+python -m gateway.cli token --name assistant --acls api-readonly
+python -m gateway.cli token --name ci-agent --acls api-readonly
 ```
 
 Copy the printed `sha256:...` hashes under `tokens:` in `gateway.yaml`, and configure each MCP client with its corresponding raw `token:` value.
@@ -115,7 +106,7 @@ Point your MCP client at the Streamable HTTP endpoint with its Bearer token:
   - `${file:/path/to/secret}`: Reads a secret from a file, strips trailing `\r`/`\n`, and registers it for redaction.
 - **`defaults`:** `rate_limit` (`60/min`), `global_rate_limit` (`null`), `max_concurrent` (`10`), `connect_timeout` (`5s`), `timeout` (`20s`), `max_response` (`2MB`), `max_request_body` (`64KB`), `allowed_response_headers` (`[content-type, etag, last-modified, retry-after]`).
 - **`services.<name>.auth.type`:** Supports `header`, `bearer`, `basic`, and `query` (automatically reserves `query.param` so agents cannot override auth parameters via `query`).
-- **`acls.<acl>.<service>.<METHOD>`:** List of relative path patterns starting with `/`. Exact segment wildcards (`*`, such as `/nodes/*/status`) are supported.
+- **`acls.<acl>.<service>.<METHOD>`:** List of relative path patterns starting with `/`. Exact segment wildcards (`*`, such as `/v1/projects/*/items`) are supported.
 - **`tokens.<agent>`:** Requires `hash: sha256:<64-hex>`, non-empty `acls`, and optional `enabled: true|false`. Duplicate token hashes across agents are rejected.
 - **`server`:** Configures `host`, `port`, `mcp_path` (`/mcp`), `allowed_hosts`, `allowed_origins`, `block_browser_origins` (`true`), `stateless_http` (`false`), and `invalid_request_rate_limit` (`120/min`).
 - **`audit`:** Configures JSONL audit logging to `stdout` (`true`) and/or `file` (`null`).
