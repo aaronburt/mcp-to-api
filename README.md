@@ -26,7 +26,7 @@ python -m gateway.cli token --name assistant --acls api-readonly
 
 ```bash
 python -m gateway.cli --config gateway.yaml --check
-docker compose up -d --build
+docker compose up -d
 curl http://127.0.0.1:8080/healthz
 ```
 

@@ -1,7 +1,6 @@
 services:
   mcp-gateway:
-    build: .
-    image: mcp-credential-gateway:latest
+    image: ghcr.io/aaronburt/mcp-to-api:latest
     restart: unless-stopped
     read_only: true
     tmpfs:
