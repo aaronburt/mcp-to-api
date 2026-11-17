@@ -325,7 +325,7 @@ class TestEgressAndGateway(unittest.IsolatedAsyncioTestCase):
         finally:
             await core.aclose()
 
-    async def test_real_tls_ca_pinning_vs_untrusted_and_verify_false(self) -> None:
+    async def test_real_tls_untrusted_rejected_vs_verify_false(self) -> None:
         cert_path = Path(self._tmp.name) / "server.pem"
         key_path = Path(self._tmp.name) / "server.key"
         _generate_self_signed_cert(cert_path, key_path)
@@ -387,19 +387,6 @@ class TestEgressAndGateway(unittest.IsolatedAsyncioTestCase):
             finally:
                 await untrusted_core.aclose()
 
-            pinned_core = make_core({"verify": True, "ca": str(cert_path)})
-            try:
-                res_ok = await pinned_core.http_request(
-                    agent_name="agent-1",
-                    service="upstream",
-                    method="GET",
-                    path="/status",
-                )
-                self.assertFalse(res_ok.is_error)
-                self.assertEqual(json.loads(res_ok.content[0].text)["body"]["data"]["version"], "1.2")
-            finally:
-                await pinned_core.aclose()
-
             insecure_core = make_core({"verify": False})
             try:
                 res_skip = await insecure_core.http_request(
@@ -409,6 +396,7 @@ class TestEgressAndGateway(unittest.IsolatedAsyncioTestCase):
                     path="/status",
                 )
                 self.assertFalse(res_skip.is_error)
+                self.assertEqual(json.loads(res_skip.content[0].text)["body"]["data"]["version"], "1.2")
             finally:
                 await insecure_core.aclose()
         finally:

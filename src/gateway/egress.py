@@ -33,12 +33,6 @@ class UpstreamResponse:
     response_bytes: int
 
 
-def _build_verify_param(service: ResolvedService) -> ssl.SSLContext | bool:
-    if service.tls_ca is not None:
-        return ssl.create_default_context(cafile=service.tls_ca)
-    return service.tls_verify
-
-
 def build_pinned_url(service: ResolvedService, normalized_path: str) -> str:
     origin = service.origin
     if normalized_path == "/":
@@ -94,7 +88,7 @@ class ServiceEgressClient:
         if transport is not None:
             client_kwargs["transport"] = transport
         else:
-            client_kwargs["verify"] = _build_verify_param(service)
+            client_kwargs["verify"] = service.tls_verify
         self._client = httpx2.AsyncClient(**client_kwargs)
 
     async def execute(

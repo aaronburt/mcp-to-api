@@ -10,8 +10,7 @@ from gateway.config import ConfigError, load_config, load_config_from_dict, pars
 from gateway.secrets import REDACTED_MARKER, Redactor
 
 
-def _make_base_config(secret_file: Path, ca_file: Path | None = None) -> dict:
-    tls_cfg = {"verify": True, "ca": str(ca_file)} if ca_file else {"verify": False}
+def _make_base_config(secret_file: Path) -> dict:
     return {
         "defaults": {
             "rate_limit": "60/min",
@@ -25,7 +24,7 @@ def _make_base_config(secret_file: Path, ca_file: Path | None = None) -> dict:
             "upstream": {
                 "url": "https://api.lan:8443/v1",
                 "description": "Internal API read-only",
-                "tls": tls_cfg,
+                "tls": {"verify": False},
                 "auth": {
                     "type": "header",
                     "header": "Authorization",
@@ -55,10 +54,8 @@ class TestConfigAndSecrets(unittest.TestCase):
             tmp_path = Path(tmp)
             secret_file = tmp_path / "api_token"
             secret_file.write_text("uuid-secret-9999\r\n", encoding="utf-8")
-            ca_file = tmp_path / "ca.pem"
-            ca_file.write_text("dummy-ca", encoding="utf-8")
 
-            raw = _make_base_config(secret_file, ca_file)
+            raw = _make_base_config(secret_file)
             with patch.dict(os.environ, {"API_KEY_ID": "svc-account"}):
                 cfg = load_config_from_dict(raw)
 
@@ -156,9 +153,7 @@ class TestConfigAndSecrets(unittest.TestCase):
                     load_config_from_dict(bad_http)
 
                 bad_tls = _make_base_config(secret_file)
-                ca_file = Path(tmp) / "ca.pem"
-                ca_file.write_text("ca", encoding="utf-8")
-                bad_tls["services"]["upstream"]["tls"] = {"verify": False, "ca": str(ca_file)}
+                bad_tls["services"]["upstream"]["tls"] = {"verify": True, "ca": "/etc/ssl/ca.pem"}
                 with self.assertRaises(ConfigError):
                     load_config_from_dict(bad_tls)
 

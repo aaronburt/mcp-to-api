@@ -70,7 +70,6 @@ class ResolvedService:
     notes: str
     origin: OriginSpec
     tls_verify: bool
-    tls_ca: str | None
     auth: ResolvedAuth
     rate_limit: RateLimitSpec
     global_rate_limit: RateLimitSpec | None
@@ -226,18 +225,7 @@ class TLSConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     verify: bool = True
-    ca: str | None = None
     allow_insecure_http: bool = False
-
-    @model_validator(mode="after")
-    def validate_tls(self) -> "TLSConfig":
-        if self.ca is not None and not self.verify:
-            raise ValueError("tls.ca cannot be combined with tls.verify: false")
-        if self.ca is not None:
-            ca_path = Path(self.ca)
-            if not ca_path.is_file():
-                raise ValueError(f"TLS CA file does not exist: {self.ca}")
-        return self
 
 
 class AuthConfig(BaseModel):
@@ -551,7 +539,6 @@ def load_config_from_dict(raw_data: dict[str, Any]) -> LoadedGatewayConfig:
             notes=svc.notes,
             origin=origin,
             tls_verify=svc.tls.verify,
-            tls_ca=svc.tls.ca,
             auth=resolved_auth,
             rate_limit=svc_rate,
             global_rate_limit=svc_global_rate,
