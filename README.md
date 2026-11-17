@@ -19,13 +19,13 @@ API_TOKEN=<upstream-api-secret>
 2. Generate per-agent bearer tokens and place the printed `sha256:...` hashes under `tokens:` in `gateway.yaml`:
 
 ```bash
-python -m gateway.cli token --name assistant --acls api-readonly
+docker compose run --rm mcp-gateway token --name assistant --acls api-readonly
 ```
 
 3. Validate and run (binds `127.0.0.1:8080` by default; set `GATEWAY_BIND_IP=0.0.0.0` in `.env` if needed):
 
 ```bash
-python -m gateway.cli --config gateway.yaml --check
+docker compose run --rm mcp-gateway --check
 docker compose up -d
 curl http://127.0.0.1:8080/healthz
 ```
@@ -36,3 +36,4 @@ curl http://127.0.0.1:8080/healthz
 
 ```bash
 PYTHONPATH=src python -m unittest discover -s tests -v
+```

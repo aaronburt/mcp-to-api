@@ -9,3 +9,4 @@ build/
 secrets/
 gateway.yaml
 .env
+test/
